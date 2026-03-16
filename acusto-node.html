@@ -24,6 +24,7 @@
 <div id="screen"><div id="label">Tap to start</div></div>
 
 <script>
+<script>
 const screenEl = document.getElementById("screen");
 const labelEl = document.getElementById("label");
 
@@ -34,18 +35,52 @@ let wakeLock = null;
 let running = false;
 
 const modes = [
-  { name: "SILENT", green: 0.018, orange: 0.028, red: 0.038 },
-  { name: "NORMAL", green: 0.028, orange: 0.040, red: 0.055 },
-  { name: "LOUD",   green: 0.040, orange: 0.060, red: 0.080 }
+  { name: "SILENT", green: 0.014, orange: 0.026, red: 0.050 },
+  { name: "NORMAL", green: 0.022, orange: 0.040, red: 0.070 },
+  { name: "LOUD",   green: 0.032, orange: 0.055, red: 0.090 }
 ];
 
 let history = [];
-let redSince = 0;
 let lastBeep = 0;
 
-function setState(color, text) {
-  screenEl.style.background = color;
-  labelEl.textContent = text + (beepMuted ? " · mute" : "");
+let currentState = "start";   // start, green, orange, red
+let stateUntil = 0;
+
+function setStateVisual(state, blinking = false) {
+  const m = modes[modeIndex];
+  const now = Date.now();
+
+  if (state === "green") {
+    screenEl.style.background = "#18a34a";
+    labelEl.textContent = m.name + " · OK" + (beepMuted ? " · mute" : "");
+  }
+
+  if (state === "orange") {
+    if (blinking && Math.floor(now / 400) % 2 === 0) {
+      screenEl.style.background = "#f59e0b";
+    } else if (blinking) {
+      screenEl.style.background = "#000000";
+    } else {
+      screenEl.style.background = "#f59e0b";
+    }
+    labelEl.textContent = m.name + " · BORDER" + (beepMuted ? " · mute" : "");
+  }
+
+  if (state === "red") {
+    if (blinking && Math.floor(now / 300) % 2 === 0) {
+      screenEl.style.background = "#dc2626";
+    } else if (blinking) {
+      screenEl.style.background = "#000000";
+    } else {
+      screenEl.style.background = "#dc2626";
+    }
+    labelEl.textContent = m.name + " · TOO LOUD" + (beepMuted ? " · mute" : "");
+  }
+
+  if (state === "start") {
+    screenEl.style.background = "black";
+    labelEl.textContent = "Tap to start";
+  }
 }
 
 async function requestWakeLock() {
@@ -59,7 +94,7 @@ async function requestWakeLock() {
 function beep() {
   if (beepMuted) return;
   const now = Date.now();
-  if (now - lastBeep < 3000) return;
+  if (now - lastBeep < 3500) return;
   lastBeep = now;
 
   const ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -93,7 +128,14 @@ async function start() {
   source.connect(analyser);
   running = true;
   await requestWakeLock();
+  currentState = "green";
   loop();
+}
+
+function decideMeasuredState(avg, m) {
+  if (avg < m.green) return "green";
+  if (avg < m.orange) return "orange";
+  return "red";
 }
 
 function loop() {
@@ -103,29 +145,50 @@ function loop() {
   const rms = rmsFromTimeData(dataArray);
 
   history.push(rms);
-  if (history.length > 12) history.shift(); // ~1.5 sec if loop ~8 fps
+  if (history.length > 18) history.shift(); // slower average
   const avg = history.reduce((a,b) => a+b, 0) / history.length;
 
   const m = modes[modeIndex];
+  const measuredState = decideMeasuredState(avg, m);
   const now = Date.now();
 
-  if (avg < m.green) {
-    redSince = 0;
-    setState("#18a34a", m.name + " · OK");
-  } else if (avg < m.orange) {
-    redSince = 0;
-    setState("#f59e0b", m.name + " · BORDER");
-  } else {
-    setState("#dc2626", m.name + " · TOO LOUD");
-    if (!redSince) redSince = now;
-    if (now - redSince > 1000) beep();
+  // If we're still inside a hold period, keep current state visible
+  if (now < stateUntil) {
+    setStateVisual(currentState, currentState === "orange" || currentState === "red");
+    requestAnimationFrame(loop);
+    return;
   }
 
+  // State transitions
+  if (measuredState === "red" && currentState !== "red") {
+    currentState = "red";
+    stateUntil = now + 4000; // hold red for 4 sec
+    beep();
+  } else if (measuredState === "orange" && currentState === "green") {
+    currentState = "orange";
+    stateUntil = now + 2500; // hold orange for 2.5 sec
+  } else if (measuredState === "green") {
+    currentState = "green";
+    stateUntil = 0;
+  } else if (measuredState === "orange" && currentState === "red") {
+    // after red period ends, do not instantly drop too far
+    currentState = "orange";
+    stateUntil = now + 2000;
+  } else if (measuredState === "red" && currentState === "orange") {
+    currentState = "red";
+    stateUntil = now + 4000;
+    beep();
+  }
+
+  setStateVisual(currentState, currentState === "orange" || currentState === "red");
   requestAnimationFrame(loop);
 }
 
 function nextMode() {
   modeIndex = (modeIndex + 1) % modes.length;
+  history = [];
+  currentState = "green";
+  stateUntil = 0;
 }
 
 let pressTimer = null;
@@ -151,6 +214,6 @@ document.body.addEventListener("pointerup", async () => {
 document.addEventListener("visibilitychange", async () => {
   if (document.visibilityState === "visible") await requestWakeLock();
 });
+
+setStateVisual("start");
 </script>
-</body>
-</html>
